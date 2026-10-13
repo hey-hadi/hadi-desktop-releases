@@ -193,6 +193,9 @@ jobs:
           sudo apt-get install -y -qq ruby ruby-dev build-essential
           sudo gem install --no-document fpm
           fpm --version
+          # Only in this job: electron-builder treats the variable being there at all — even empty —
+          # as "use the system's fpm", which the x64 job doesn't have.
+          echo "USE_SYSTEM_FPM=true" >> "$GITHUB_ENV"
 
       - name: Stamp the version
         working-directory: hadi-desktop
@@ -245,8 +248,6 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Only set on ARM Linux, where the fpm installed above packs the .deb.
-          USE_SYSTEM_FPM: ${{ (matrix.platform == 'linux' && matrix.arch == 'arm64') && 'true' || '' }}
         # Publishing is the publish job's, once every platform has built.
         run: pnpm exec electron-builder ${{ matrix.target }} --publish never
 
