@@ -1,0 +1,374 @@
+# Builds HADI for Mac (Apple Silicon and Intel) and Windows from the private source repo
+# (mkaumee/Hadi) and publishes the installers as a release of THIS public repo:
+#   - Actions minutes are free here (a public repo), Mac runners included;
+#   - downloads come from GitHub's CDN (the website links to releases/latest/download/…);
+#   - the installed app updates itself from these releases (electron-updater, `github` provider).
+#
+# Canonical copy: mkaumee/Hadi → hadi-desktop/releases-repo/. Edit it there, then copy it here.
+#
+# Started by mkaumee/Hadi's "Desktop release" workflow (a repository_dispatch on every push to
+# main that changes the desktop app or the agent), or by hand: Actions → Build and release HADI
+# → Run workflow (any branch, tag or commit of mkaumee/Hadi).
+#
+# Secrets (Settings → Secrets and variables → Actions → New repository secret):
+#   HADI_SOURCE_TOKEN       required — fine-grained token: repository mkaumee/Hadi only, Contents: Read-only
+#   CSC_LINK                macOS signing: the Developer ID Application certificate (.p12), base64
+#   CSC_KEY_PASSWORD        its password
+#   APPLE_ID                notarization: the Apple ID's email
+#   APPLE_APP_SPECIFIC_PASSWORD  an app-specific password for it (appleid.apple.com)
+#   APPLE_TEAM_ID           the team (933JL62NMV)
+#   VITE_POSTHOG_KEY, POSTHOG_KEY (+ optional VITE_POSTHOG_HOST, POSTHOG_HOST) — analytics, baked in
+#   WIN_CSC_LINK, WIN_CSC_KEY_PASSWORD — optional Windows code-signing certificate
+# Without the Apple certificate the Mac builds are unsigned (Gatekeeper blocks them, and installed Macs can't
+# update to them), so that run is published as a PRE-release: there to test, but not "latest" — the website
+# buttons and the installed apps keep the last signed release.
+#
+# The source is fetched as a tarball through the API (never git), so no commit message from the private
+# repo appears in this public repo's logs.
+
+name: Build and release HADI
+
+on:
+  repository_dispatch:
+    types: [desktop-release]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit of mkaumee/Hadi to build
+        required: false
+        default: main
+
+# One release at a time. A run started while one builds waits; if several pile up, only the
+# newest waits (GitHub keeps one pending run per group), so the latest commit always ships.
+concurrency:
+  group: hadi-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: mkaumee/Hadi
+  NODE_VERSION: "22.x"
+  PNPM_VERSION: "10.28.0"
+
+jobs:
+  prepare:
+    name: Pick the commit and the version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+      version: ${{ steps.pick.outputs.version }}
+    steps:
+      - name: Check the source token is set
+        env:
+          HAS_TOKEN: ${{ secrets.HADI_SOURCE_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::error title=Missing secret::Add HADI_SOURCE_TOKEN (a fine-grained token with read access to mkaumee/Hadi's contents) in Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+      # The ref is resolved now, when this run starts (after any run before it has finished), so
+      # the newest run always builds the newest commit. Every build is a release, so every build
+      # needs a higher version than the last, or the installed apps won't take it: major.minor
+      # from hadi-desktop/package.json, then this workflow's run number (it only goes up). Bump
+      # major or minor there for a big release.
+      - name: Pin the commit and number the version
+        id: pick
+        env:
+          TOKEN: ${{ secrets.HADI_SOURCE_TOKEN }}
+          REF: ${{ github.event.client_payload.ref || inputs.ref || 'main' }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then echo "::error::Not a branch, tag or commit: $REF"; exit 1; fi
+          api() { curl -sSfL -H "Authorization: Bearer $TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" "$@"; }
+          sha=$(api -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$SOURCE_REPO/commits/$REF" | jq -r .sha)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Couldn't resolve $REF in $SOURCE_REPO"; exit 1; }
+          base=$(api -H "Accept: application/vnd.github.raw+json" "https://api.github.com/repos/$SOURCE_REPO/contents/hadi-desktop/package.json?ref=$sha" \
+            | jq -r '.version | split(".") | .[0:2] | join(".")')
+          [[ "$base" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "::error::Unexpected version in hadi-desktop/package.json: $base"; exit 1; }
+          version="$base.${{ github.run_number }}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building HADI $version from ${sha:0:7}" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build for ${{ matrix.name }}
+    needs: prepare
+    strategy:
+      # Every platform runs to the end, so one run shows every platform's problem. Nothing is
+      # published unless all of them succeed.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Mac (Apple Silicon)
+            os: macos-15
+            platform: mac
+            arch: arm64
+            target: --mac --arm64
+          - name: Mac (Intel)
+            os: macos-15-intel
+            platform: mac
+            arch: x64
+            target: --mac --x64
+          - name: Windows
+            os: windows-latest
+            platform: win
+            arch: x64
+            target: --win --x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        # Git Bash on Windows, so every step is the same script everywhere.
+        shell: bash
+    steps:
+      # A tarball of the pinned commit: no git, so no .git with the token for the install scripts
+      # below to read, and no commit message in this public log.
+      - name: Get the source
+        env:
+          TOKEN: ${{ secrets.HADI_SOURCE_TOKEN }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          curl -sSfL -H "Authorization: Bearer $TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$SOURCE_REPO/tarball/$SHA" -o source.tar.gz
+          tar -xzf source.tar.gz --strip-components=1
+          rm source.tar.gz
+          test -f hadi-desktop/package.json
+
+      - name: Set up pnpm
+        # Pinned to v4.4.0's commit: a third-party action, in a job that holds the signing secrets.
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the agent's dependencies
+        working-directory: hadi-agent-next
+        run: pnpm install --frozen-lockfile
+
+      - name: Install the desktop app's dependencies
+        working-directory: hadi-desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Stamp the version
+        working-directory: hadi-desktop
+        run: npm pkg set "version=${{ needs.prepare.outputs.version }}"
+
+      # Builds hadi-agent-next, stages its production node_modules and downloads the Node and
+      # gog binaries for this platform into resources/hadi-agent (scripts/prepare-agent.mjs).
+      - name: Bundle the agent
+        working-directory: hadi-desktop
+        run: node scripts/prepare-agent.mjs
+
+      - name: Build the native notch
+        if: matrix.platform == 'mac'
+        working-directory: hadi-desktop
+        env:
+          # A release never ships without the notch: a failed Swift build fails the run.
+          HADI_NATIVE_STRICT: "1"
+        run: node scripts/build-native.mjs
+
+      - name: Build the app
+        working-directory: hadi-desktop
+        env:
+          S_VITE_POSTHOG_KEY: ${{ secrets.VITE_POSTHOG_KEY }}
+          S_VITE_POSTHOG_HOST: ${{ secrets.VITE_POSTHOG_HOST }}
+          S_POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}
+          S_POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+        run: |
+          set -euo pipefail
+          # Only what's set: an empty host would replace the default one.
+          [ -n "$S_VITE_POSTHOG_KEY" ] && export VITE_POSTHOG_KEY="$S_VITE_POSTHOG_KEY"
+          [ -n "$S_VITE_POSTHOG_HOST" ] && export VITE_POSTHOG_HOST="$S_VITE_POSTHOG_HOST"
+          [ -n "$S_POSTHOG_KEY" ] && export POSTHOG_KEY="$S_POSTHOG_KEY"
+          [ -n "$S_POSTHOG_HOST" ] && export POSTHOG_HOST="$S_POSTHOG_HOST"
+          [ -z "${VITE_POSTHOG_KEY:-}" ] && echo "::warning::No VITE_POSTHOG_KEY / POSTHOG_KEY secrets — this build sends no analytics."
+          pnpm build
+
+      - name: Package the installer
+        working-directory: hadi-desktop
+        env:
+          # With a Mac certificate given, electron-builder imports it into a keychain of its own and
+          # must look for the identity there (it finds none if this is "false", and silently skips
+          # signing). Without one — Windows, or no secret — never use anything found on the runner.
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ (matrix.platform == 'mac' && secrets.CSC_LINK != '') && 'true' || 'false' }}
+          # The Apple certificate is for the Mac builds only (on Windows electron-builder would try
+          # to sign the .exe with it); Windows signs with WIN_CSC_LINK when that's set.
+          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.CSC_KEY_PASSWORD || '' }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # Publishing is the publish job's, once every platform has built.
+        run: pnpm exec electron-builder ${{ matrix.target }} --publish never
+
+      - name: Check the Mac app's signature and notarization
+        if: matrix.platform == 'mac'
+        working-directory: hadi-desktop
+        env:
+          SIGNED: ${{ secrets.CSC_LINK != '' }}
+        run: |
+          set -euo pipefail
+          app=$(ls -d release/mac*/HADI.app | head -n 1)
+          if [ "$SIGNED" = "true" ]; then
+            codesign --verify --deep --strict --verbose=2 "$app"
+            # Passes only for a Developer ID app Apple has notarized — what a downloaded copy needs.
+            spctl --assess --type execute --verbose=4 "$app"
+          else
+            echo "::warning title=Unsigned Mac build::No CSC_LINK secret, so this Mac build isn't signed or notarized. macOS will block it for the people who download it, and installed copies can't update to it."
+          fi
+
+      - name: Collect what gets published
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p publish
+          cd hadi-desktop/release
+          # Both Mac builds write a latest-mac.yml; the publish job merges them into one.
+          if [ -f latest-mac.yml ]; then mv latest-mac.yml "latest-mac-${{ matrix.arch }}.yml"; fi
+          files=(*.dmg *.zip *.blockmap latest*.yml)
+          # The installer, not the uninstaller electron-builder may leave beside it.
+          for exe in *.exe; do [[ "$exe" == __* ]] || files+=("$exe"); done
+          if [ ${#files[@]} -eq 0 ]; then echo "::error::electron-builder produced nothing to publish"; exit 1; fi
+          cp "${files[@]}" ../../publish/
+          ls -la ../../publish
+
+      - name: Hand the files to the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: hadi-${{ matrix.platform }}-${{ matrix.arch }}
+          path: publish/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish the release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SHA: ${{ needs.prepare.outputs.sha }}
+      SIGNED: ${{ secrets.CSC_LINK != '' }}
+    steps:
+      - name: Get every platform's files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hadi-*
+          path: dist
+          merge-multiple: true
+
+      # The installed Macs read one latest-mac.yml and pick their own build from it
+      # (electron-updater prefers the arm64 files on Apple Silicon and skips them on Intel).
+      - name: One update manifest for both kinds of Mac
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          command -v yq >/dev/null || {
+            sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          }
+          yq eval-all '. as $item ireduce ({}; . *+ $item)' latest-mac-x64.yml latest-mac-arm64.yml > latest-mac.yml
+          rm latest-mac-x64.yml latest-mac-arm64.yml
+          cat latest-mac.yml
+          urls=$(yq '.files[].url' latest-mac.yml)
+          echo "$urls" | grep -q 'arm64.*\.zip$' || { echo "::error::latest-mac.yml has no Apple Silicon zip"; exit 1; }
+          echo "$urls" | grep -v arm64 | grep -q '\.zip$' || { echo "::error::latest-mac.yml has no Intel zip"; exit 1; }
+          [ "$(yq '.version' latest-mac.yml)" = "$VERSION" ] || { echo "::error::latest-mac.yml isn't version $VERSION"; exit 1; }
+          [ "$(yq '.version' latest.yml)" = "$VERSION" ] || { echo "::error::latest.yml isn't version $VERSION"; exit 1; }
+
+      # Names that never change, for the website's download buttons:
+      # https://github.com/<this repo>/releases/latest/download/<name>
+      - name: Copies under fixed names for the website
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          # The one file a pattern matches (a pattern matching none stays itself, and isn't a file).
+          one() {
+            if [ $# -ne 1 ] || [ ! -f "$1" ]; then
+              echo "::error::expected exactly one file, got: $*" >&2
+              exit 1
+            fi
+            echo "$1"
+          }
+          arm=$(one ./*-arm64.dmg)
+          intel=$(one ./*-x64.dmg)
+          win=$(one ./*.exe)
+          cp "$arm" HADI-mac-apple-silicon.dmg
+          cp "$intel" HADI-mac-intel.dmg
+          cp "$win" HADI-windows-setup.exe
+          ls -la
+
+      - name: Publish
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          repo="$GITHUB_REPOSITORY"
+          # A re-run after a failed upload finds its own draft: start that one again. (A draft has
+          # no tag yet, so there's none to clean up.)
+          if draft=$(gh release view "$tag" --repo "$repo" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" = "true" ]; then
+              gh release delete "$tag" --repo "$repo" --yes
+            else
+              echo "::error::$tag is already released"; exit 1
+            fi
+          fi
+          notes="HADI $VERSION for Mac and Windows (build ${SHA:0:7}). Installed copies update themselves."
+          if [ "$SIGNED" != "true" ]; then
+            notes="$notes
+
+          **Test build — not signed for macOS.** Macs will block it and installed copies won't update to it. Add the Apple secrets to release it for real."
+          fi
+          # As a draft first, so nobody (no website button, no installed app) sees a release whose
+          # files are still uploading; then published in one step.
+          gh release create "$tag" --repo "$repo" --target "$GITHUB_SHA" \
+            --title "HADI $VERSION" --notes "$notes" --draft ./*
+          if [ "$SIGNED" != "true" ]; then
+            # Unsigned: a pre-release. The website's /releases/latest/ links and the installed apps
+            # (releaseType: release) never pick it; they keep the last signed release.
+            gh release edit "$tag" --repo "$repo" --draft=false --prerelease
+            echo "::warning title=Pre-release only::HADI $VERSION isn't signed for macOS (no CSC_LINK secret), so it went out as a pre-release: nobody gets it until the Apple secrets are added."
+            echo "## HADI $VERSION — pre-release (not signed for macOS)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # "Latest" only if it is the newest: re-running an old run must not turn the website and
+          # the updates back to an older build.
+          current=$(gh release view --repo "$repo" --json tagName --jq .tagName 2>/dev/null || true)
+          newest=$(printf '%s\n%s\n' "${current:-v0.0.0}" "$tag" | sed 's/^v//' | sort -V | tail -n 1)
+          if [ "$newest" = "$VERSION" ]; then
+            gh release edit "$tag" --repo "$repo" --draft=false --latest
+          else
+            gh release edit "$tag" --repo "$repo" --draft=false --latest=false
+            echo "::warning::$current is newer than $tag, so $tag was published without becoming latest."
+          fi
+          {
+            echo "## HADI $VERSION is out"
+            echo ""
+            echo "- [Mac (Apple Silicon)](https://github.com/$repo/releases/latest/download/HADI-mac-apple-silicon.dmg)"
+            echo "- [Mac (Intel)](https://github.com/$repo/releases/latest/download/HADI-mac-intel.dmg)"
+            echo "- [Windows](https://github.com/$repo/releases/latest/download/HADI-windows-setup.exe)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Keep the newest 20 releases. Older ones only cost the differential download of someone
+      # updating from a very old version (they get the full file instead).
+      - name: Remove old releases
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --exclude-drafts --json tagName --jq '.[].tagName' \
+            | tail -n +21 \
+            | while read -r old; do gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag; done
