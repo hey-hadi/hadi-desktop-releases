@@ -118,7 +118,8 @@ jobs:
             platform: win
             arch: x64
             target: --win --x64
-          # Linux: an AppImage — one file that runs on any distribution and updates itself.
+          # Linux: a .deb (Ubuntu, Debian, Mint — a double-click installs it) and an AppImage (one file,
+          # any distribution). Both update themselves.
           - name: Linux (x64)
             os: ubuntu-24.04
             platform: linux
@@ -168,6 +169,30 @@ jobs:
       - name: Install the desktop app's dependencies
         working-directory: hadi-desktop
         run: pnpm install --frozen-lockfile
+
+      # uiohook-napi's published "linux-arm64" binary is really an x86-64 one (the hold-to-talk keyboard
+      # hook would never load on ARM Linux): build it for arm64 here, put it where node-gyp-build
+      # looks, and check that it is arm64.
+      - name: Build the keyboard hook for ARM Linux
+        if: matrix.platform == 'linux' && matrix.arch == 'arm64'
+        working-directory: hadi-desktop/node_modules/uiohook-napi
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libx11-dev libxtst-dev libxt-dev libxrandr-dev libxinerama-dev libxkbcommon-x11-dev libx11-xcb-dev libxkbfile-dev
+          npx --yes node-gyp@11 rebuild
+          built=$(ls build/Release/*.node | head -n 1)
+          file "$built" | tee /dev/stderr | grep -q aarch64
+          cp "$built" prebuilds/linux-arm64/uiohook-napi.node
+
+      # electron-builder's own .deb packer (fpm) only runs on x64; on ARM it uses the system's.
+      - name: Install fpm for the ARM .deb
+        if: matrix.platform == 'linux' && matrix.arch == 'arm64'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq ruby ruby-dev build-essential
+          sudo gem install --no-document fpm
+          fpm --version
 
       - name: Stamp the version
         working-directory: hadi-desktop
@@ -220,6 +245,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Only set on ARM Linux, where the fpm installed above packs the .deb.
+          USE_SYSTEM_FPM: ${{ (matrix.platform == 'linux' && matrix.arch == 'arm64') && 'true' || '' }}
         # Publishing is the publish job's, once every platform has built.
         run: pnpm exec electron-builder ${{ matrix.target }} --publish never
 
@@ -239,6 +266,14 @@ jobs:
             echo "::warning title=Unsigned Mac build::No CSC_LINK secret, so this Mac build isn't signed or notarized. macOS will block it for the people who download it, and installed copies can't update to it."
           fi
 
+      - name: Check the ARM Linux app carries an arm64 keyboard hook
+        if: matrix.platform == 'linux' && matrix.arch == 'arm64'
+        working-directory: hadi-desktop
+        run: |
+          set -euo pipefail
+          hook=$(ls release/linux-arm64-unpacked/resources/app.asar.unpacked/node_modules/uiohook-napi/prebuilds/linux-arm64/*.node)
+          file "$hook" | tee /dev/stderr | grep -q aarch64
+
       - name: Collect what gets published
         run: |
           set -euo pipefail
@@ -247,7 +282,7 @@ jobs:
           cd hadi-desktop/release
           # Both Mac builds write a latest-mac.yml; the publish job merges them into one.
           if [ -f latest-mac.yml ]; then mv latest-mac.yml "latest-mac-${{ matrix.arch }}.yml"; fi
-          files=(*.dmg *.zip *.AppImage *.blockmap latest*.yml)
+          files=(*.dmg *.zip *.AppImage *.deb *.blockmap latest*.yml)
           # The installer, not the uninstaller electron-builder may leave beside it.
           for exe in *.exe; do [[ "$exe" == __* ]] || files+=("$exe"); done
           if [ ${#files[@]} -eq 0 ]; then echo "::error::electron-builder produced nothing to publish"; exit 1; fi
@@ -323,11 +358,15 @@ jobs:
           win=$(one ./*.exe)
           linux=$(one ./*-x86_64.AppImage)
           linux_arm=$(one ./*-arm64.AppImage)
+          deb=$(one ./*-amd64.deb)
+          deb_arm=$(one ./*-arm64.deb)
           cp "$arm" HADI-mac-apple-silicon.dmg
           cp "$intel" HADI-mac-intel.dmg
           cp "$win" HADI-windows-setup.exe
           cp "$linux" HADI-linux-x64.AppImage
           cp "$linux_arm" HADI-linux-arm64.AppImage
+          cp "$deb" HADI-linux-x64.deb
+          cp "$deb_arm" HADI-linux-arm64.deb
           ls -la
 
       - name: Publish
@@ -379,8 +418,8 @@ jobs:
             echo "- [Mac (Apple Silicon)](https://github.com/$repo/releases/latest/download/HADI-mac-apple-silicon.dmg)"
             echo "- [Mac (Intel)](https://github.com/$repo/releases/latest/download/HADI-mac-intel.dmg)"
             echo "- [Windows](https://github.com/$repo/releases/latest/download/HADI-windows-setup.exe)"
-            echo "- [Linux (x64)](https://github.com/$repo/releases/latest/download/HADI-linux-x64.AppImage)"
-            echo "- [Linux (arm64)](https://github.com/$repo/releases/latest/download/HADI-linux-arm64.AppImage)"
+            echo "- Linux (x64): [.deb](https://github.com/$repo/releases/latest/download/HADI-linux-x64.deb) · [AppImage](https://github.com/$repo/releases/latest/download/HADI-linux-x64.AppImage)"
+            echo "- Linux (arm64): [.deb](https://github.com/$repo/releases/latest/download/HADI-linux-arm64.deb) · [AppImage](https://github.com/$repo/releases/latest/download/HADI-linux-arm64.AppImage)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Keep the newest 20 releases. Older ones only cost the differential download of someone
