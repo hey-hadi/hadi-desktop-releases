@@ -1,4 +1,4 @@
-# Builds HADI for Mac (Apple Silicon and Intel) and Windows from the private source repo
+# Builds HADI for Mac (Apple Silicon and Intel), Windows and Linux (x64 and arm64) from the private source repo
 # (mkaumee/Hadi) and publishes the installers as a release of THIS public repo:
 #   - Actions minutes are free here (a public repo), Mac runners included;
 #   - downloads come from GitHub's CDN (the website links to releases/latest/download/…);
@@ -118,6 +118,17 @@ jobs:
             platform: win
             arch: x64
             target: --win --x64
+          # Linux: an AppImage — one file that runs on any distribution and updates itself.
+          - name: Linux (x64)
+            os: ubuntu-24.04
+            platform: linux
+            arch: x64
+            target: --linux --x64
+          - name: Linux (arm64)
+            os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            target: --linux --arm64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -236,7 +247,7 @@ jobs:
           cd hadi-desktop/release
           # Both Mac builds write a latest-mac.yml; the publish job merges them into one.
           if [ -f latest-mac.yml ]; then mv latest-mac.yml "latest-mac-${{ matrix.arch }}.yml"; fi
-          files=(*.dmg *.zip *.blockmap latest*.yml)
+          files=(*.dmg *.zip *.AppImage *.blockmap latest*.yml)
           # The installer, not the uninstaller electron-builder may leave beside it.
           for exe in *.exe; do [[ "$exe" == __* ]] || files+=("$exe"); done
           if [ ${#files[@]} -eq 0 ]; then echo "::error::electron-builder produced nothing to publish"; exit 1; fi
@@ -289,7 +300,9 @@ jobs:
           echo "$urls" | grep -q 'arm64.*\.zip$' || { echo "::error::latest-mac.yml has no Apple Silicon zip"; exit 1; }
           echo "$urls" | grep -v arm64 | grep -q '\.zip$' || { echo "::error::latest-mac.yml has no Intel zip"; exit 1; }
           [ "$(yq '.version' latest-mac.yml)" = "$VERSION" ] || { echo "::error::latest-mac.yml isn't version $VERSION"; exit 1; }
-          [ "$(yq '.version' latest.yml)" = "$VERSION" ] || { echo "::error::latest.yml isn't version $VERSION"; exit 1; }
+          for manifest in latest.yml latest-linux.yml latest-linux-arm64.yml; do
+            [ "$(yq '.version' "$manifest")" = "$VERSION" ] || { echo "::error::$manifest isn't version $VERSION"; exit 1; }
+          done
 
       # Names that never change, for the website's download buttons:
       # https://github.com/<this repo>/releases/latest/download/<name>
@@ -308,9 +321,13 @@ jobs:
           arm=$(one ./*-arm64.dmg)
           intel=$(one ./*-x64.dmg)
           win=$(one ./*.exe)
+          linux=$(one ./*-x86_64.AppImage)
+          linux_arm=$(one ./*-arm64.AppImage)
           cp "$arm" HADI-mac-apple-silicon.dmg
           cp "$intel" HADI-mac-intel.dmg
           cp "$win" HADI-windows-setup.exe
+          cp "$linux" HADI-linux-x64.AppImage
+          cp "$linux_arm" HADI-linux-arm64.AppImage
           ls -la
 
       - name: Publish
@@ -328,7 +345,7 @@ jobs:
               echo "::error::$tag is already released"; exit 1
             fi
           fi
-          notes="HADI $VERSION for Mac and Windows (build ${SHA:0:7}). Installed copies update themselves."
+          notes="HADI $VERSION for Mac, Windows and Linux (build ${SHA:0:7}). Installed copies update themselves."
           if [ "$SIGNED" != "true" ]; then
             notes="$notes
 
@@ -362,6 +379,8 @@ jobs:
             echo "- [Mac (Apple Silicon)](https://github.com/$repo/releases/latest/download/HADI-mac-apple-silicon.dmg)"
             echo "- [Mac (Intel)](https://github.com/$repo/releases/latest/download/HADI-mac-intel.dmg)"
             echo "- [Windows](https://github.com/$repo/releases/latest/download/HADI-windows-setup.exe)"
+            echo "- [Linux (x64)](https://github.com/$repo/releases/latest/download/HADI-linux-x64.AppImage)"
+            echo "- [Linux (arm64)](https://github.com/$repo/releases/latest/download/HADI-linux-arm64.AppImage)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Keep the newest 20 releases. Older ones only cost the differential download of someone
