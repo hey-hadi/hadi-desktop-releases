@@ -131,8 +131,8 @@ jobs:
             arch: arm64
             target: --linux --arm64
     runs-on: ${{ matrix.os }}
-    # Room for a Mac's second packaging after a long first wait on Apple.
-    timeout-minutes: 150
+    # A Mac waits on Apple's notary service — hours, for a new developer (notarize.cjs gives up after 300 minutes).
+    timeout-minutes: ${{ matrix.platform == 'mac' && 330 || 60 }}
     defaults:
       run:
         # Git Bash on Windows, so every step is the same script everywhere.
@@ -233,6 +233,25 @@ jobs:
           [ -z "${VITE_POSTHOG_KEY:-}" ] && echo "::warning::No VITE_POSTHOG_KEY / POSTHOG_KEY secrets — this build sends no analytics."
           pnpm build
 
+      # Notarizing is this repo's own hook (notarize.cjs): it rides out the runner losing its network
+      # during Apple's long waits, which electron-builder's built-in notarizing doesn't.
+      - name: Get the notarization hook
+        if: matrix.platform == 'mac'
+        uses: actions/checkout@v4
+        with:
+          path: .release-tools
+          sparse-checkout: notarize.cjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Notarize with the hook
+        if: matrix.platform == 'mac'
+        working-directory: hadi-desktop
+        run: |
+          set -euo pipefail
+          npm pkg set build.mac.notarize=false --json
+          npm pkg set "build.afterSign=$GITHUB_WORKSPACE/.release-tools/notarize.cjs"
+
       - name: Package the installer
         working-directory: hadi-desktop
         env:
@@ -249,20 +268,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          PLATFORM: ${{ matrix.platform }}
-        # Publishing is the publish job's, once every platform has built. A Mac build waits on Apple's
-        # notary service for minutes (an hour, the first time); a runner that loses its network while
-        # it waits fails the whole release, so a Mac gets a second go (signed and sent to Apple again —
-        # quick once Apple has seen the app).
-        run: |
-          set -uo pipefail
-          tries=1
-          [ "$PLATFORM" = "mac" ] && tries=2
-          for try in $(seq 1 "$tries"); do
-            pnpm exec electron-builder ${{ matrix.target }} --publish never && exit 0
-            [ "$try" -lt "$tries" ] && echo "::warning title=Packaging failed::Try $try of $tries failed — packaging again."
-          done
-          exit 1
+          HADI_NOTARIZE_MINUTES: "300"
+        # Publishing is the publish job's, once every platform has built.
+        run: pnpm exec electron-builder ${{ matrix.target }} --publish never
 
       - name: Check the Mac app's signature and notarization
         if: matrix.platform == 'mac'
