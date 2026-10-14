@@ -1,17 +1,17 @@
 # Builds HADI for Mac (Apple Silicon and Intel), Windows and Linux (x64 and arm64) from the private source repo
-# (mkaumee/Hadi) and publishes the installers as a release of THIS public repo:
+# (hey-hadi/Hadi) and publishes the installers as a release of THIS public repo:
 #   - Actions minutes are free here (a public repo), Mac runners included;
 #   - downloads come from GitHub's CDN (the website links to releases/latest/download/…);
 #   - the installed app updates itself from these releases (electron-updater, `github` provider).
 #
-# Canonical copy: mkaumee/Hadi → hadi-desktop/releases-repo/. Edit it there, then copy it here.
+# Canonical copy: hey-hadi/Hadi → hadi-desktop/releases-repo/. Edit it there, then copy it here.
 #
-# Started by mkaumee/Hadi's "Desktop release" workflow (a repository_dispatch on every push to
+# Started by hey-hadi/Hadi's "Desktop release" workflow (a repository_dispatch on every push to
 # main that changes the desktop app or the agent), or by hand: Actions → Build and release HADI
-# → Run workflow (any branch, tag or commit of mkaumee/Hadi).
+# → Run workflow (any branch, tag or commit of hey-hadi/Hadi).
 #
 # Secrets (Settings → Secrets and variables → Actions → New repository secret):
-#   HADI_SOURCE_TOKEN       required — fine-grained token: repository mkaumee/Hadi only, Contents: Read-only
+#   HADI_SOURCE_TOKEN       required — fine-grained token, resource owner hey-hadi: repository Hadi, Contents: Read-only
 #   CSC_LINK                macOS signing: the Developer ID Application certificate (.p12), base64
 #   CSC_KEY_PASSWORD        its password
 #   APPLE_ID                notarization: the Apple ID's email
@@ -34,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Branch, tag or commit of mkaumee/Hadi to build
+        description: Branch, tag or commit of hey-hadi/Hadi to build
         required: false
         default: main
 
@@ -48,7 +48,7 @@ permissions:
   contents: read
 
 env:
-  SOURCE_REPO: mkaumee/Hadi
+  SOURCE_REPO: hey-hadi/Hadi
   NODE_VERSION: "22.x"
   PNPM_VERSION: "10.28.0"
 
@@ -66,7 +66,7 @@ jobs:
           HAS_TOKEN: ${{ secrets.HADI_SOURCE_TOKEN != '' }}
         run: |
           if [ "$HAS_TOKEN" != "true" ]; then
-            echo "::error title=Missing secret::Add HADI_SOURCE_TOKEN (a fine-grained token with read access to mkaumee/Hadi's contents) in Settings → Secrets and variables → Actions."
+            echo "::error title=Missing secret::Add HADI_SOURCE_TOKEN (a fine-grained token with read access to hey-hadi/Hadi's contents) in Settings → Secrets and variables → Actions."
             exit 1
           fi
 
@@ -382,13 +382,13 @@ jobs:
           linux_arm=$(one ./*-arm64.AppImage)
           deb=$(one ./*-amd64.deb)
           deb_arm=$(one ./*-arm64.deb)
-          cp "$arm" HADI-mac-apple-silicon.dmg
-          cp "$intel" HADI-mac-intel.dmg
-          cp "$win" HADI-windows-setup.exe
-          cp "$linux" HADI-linux-x64.AppImage
-          cp "$linux_arm" HADI-linux-arm64.AppImage
-          cp "$deb" HADI-linux-x64.deb
-          cp "$deb_arm" HADI-linux-arm64.deb
+          cp "$arm" HADI.dmg
+          cp "$intel" HADI-Intel.dmg
+          cp "$win" HADI.exe
+          cp "$linux" HADI.AppImage
+          cp "$linux_arm" HADI-ARM.AppImage
+          cp "$deb" HADI.deb
+          cp "$deb_arm" HADI-ARM.deb
           ls -la
 
       - name: Publish
@@ -437,11 +437,11 @@ jobs:
           {
             echo "## HADI $VERSION is out"
             echo ""
-            echo "- [Mac (Apple Silicon)](https://github.com/$repo/releases/latest/download/HADI-mac-apple-silicon.dmg)"
-            echo "- [Mac (Intel)](https://github.com/$repo/releases/latest/download/HADI-mac-intel.dmg)"
-            echo "- [Windows](https://github.com/$repo/releases/latest/download/HADI-windows-setup.exe)"
-            echo "- Linux (x64): [.deb](https://github.com/$repo/releases/latest/download/HADI-linux-x64.deb) · [AppImage](https://github.com/$repo/releases/latest/download/HADI-linux-x64.AppImage)"
-            echo "- Linux (arm64): [.deb](https://github.com/$repo/releases/latest/download/HADI-linux-arm64.deb) · [AppImage](https://github.com/$repo/releases/latest/download/HADI-linux-arm64.AppImage)"
+            echo "- [Mac (Apple Silicon)](https://github.com/$repo/releases/latest/download/HADI.dmg)"
+            echo "- [Mac (Intel)](https://github.com/$repo/releases/latest/download/HADI-Intel.dmg)"
+            echo "- [Windows](https://github.com/$repo/releases/latest/download/HADI.exe)"
+            echo "- Linux (x64): [.deb](https://github.com/$repo/releases/latest/download/HADI.deb) · [AppImage](https://github.com/$repo/releases/latest/download/HADI.AppImage)"
+            echo "- Linux (arm64): [.deb](https://github.com/$repo/releases/latest/download/HADI-ARM.deb) · [AppImage](https://github.com/$repo/releases/latest/download/HADI-ARM.AppImage)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Keep the newest 20 releases. Older ones only cost the differential download of someone
