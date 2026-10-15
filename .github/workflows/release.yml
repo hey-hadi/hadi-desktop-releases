@@ -219,6 +219,8 @@ jobs:
       - name: Build the app
         working-directory: hadi-desktop
         env:
+          # The commit built, stamped into the app (a problem report names it: "Build: @1a2b3c4d").
+          HADI_BUILD_SHA: ${{ needs.prepare.outputs.sha }}
           S_VITE_POSTHOG_KEY: ${{ secrets.VITE_POSTHOG_KEY }}
           S_VITE_POSTHOG_HOST: ${{ secrets.VITE_POSTHOG_HOST }}
           S_POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}
