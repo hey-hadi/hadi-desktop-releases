@@ -132,6 +132,13 @@ jobs:
         working-directory: ${{ runner.temp }}/src/hadi-mobile
         run: npm ci --no-audit --no-fund
 
+      # Gradle's defaults (2 GB heap, 512 MB metaspace) run out packaging the APK; the runner has
+      # 16 GB. The user-level gradle.properties wins over the project's (made fresh by prebuild).
+      - name: Give Gradle room
+        run: |
+          mkdir -p "$HOME/.gradle"
+          echo "org.gradle.jvmargs=-Xmx8g -XX:MaxMetaspaceSize=2g -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> "$HOME/.gradle/gradle.properties"
+
       - name: Build the APK
         working-directory: ${{ runner.temp }}/src/hadi-mobile
         env:
