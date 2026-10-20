@@ -446,11 +446,13 @@ jobs:
             echo "- Linux (arm64): [.deb](https://github.com/$repo/releases/latest/download/HADI-ARM.deb) · [AppImage](https://github.com/$repo/releases/latest/download/HADI-ARM.AppImage)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Keep the newest 20 releases. Older ones only cost the differential download of someone
-      # updating from a very old version (they get the full file instead).
+      # Keep the newest 20 desktop releases (v…; the phone app's `android` release is mobile.yml's).
+      # Older ones only cost the differential download of someone updating from a very old version
+      # (they get the full file instead).
       - name: Remove old releases
         run: |
           set -euo pipefail
           gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --exclude-drafts --json tagName --jq '.[].tagName' \
+            | grep '^v' \
             | tail -n +21 \
             | while read -r old; do gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag; done
